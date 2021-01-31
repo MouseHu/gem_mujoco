@@ -106,7 +106,7 @@ class FeedForwardPolicy(TD3Policy):
         self.cnn_extractor = cnn_extractor
         self.reuse = reuse
         if layers is None:
-            layers = [64, 64]
+            layers = [400, 300]
         self.layers = layers
 
         assert len(layers) >= 1, "Error: must have at least one hidden layer for the policy."

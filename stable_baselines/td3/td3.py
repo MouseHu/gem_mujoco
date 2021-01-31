@@ -11,6 +11,7 @@ from stable_baselines.common.math_util import safe_mean, unscale_action, scale_a
 from stable_baselines.common.schedules import get_schedule_fn
 from stable_baselines.common.buffers import ReplayBuffer
 from stable_baselines.td3.policies import TD3Policy
+from stable_baselines.common.evaluation import evaluate_policy
 
 
 class TD3(OffPolicyRLModel):
@@ -55,9 +56,10 @@ class TD3(OffPolicyRLModel):
     :param n_cpu_tf_sess: (int) The number of threads for TensorFlow operations
         If None, the number of cpu of the current machine will be used.
     """
+
     def __init__(self, policy, env, gamma=0.99, learning_rate=3e-4, buffer_size=50000,
                  learning_starts=100, train_freq=100, gradient_steps=100, batch_size=128,
-                 tau=0.005, policy_delay=2, action_noise=None,
+                 tau=0.005, policy_delay=2, action_noise=None,eval_env=None,
                  target_policy_noise=0.2, target_noise_clip=0.5,
                  random_exploration=0.0, verbose=0, tensorboard_log=None,
                  _init_setup_model=True, policy_kwargs=None,
@@ -80,6 +82,7 @@ class TD3(OffPolicyRLModel):
         self.policy_delay = policy_delay
         self.target_noise_clip = target_noise_clip
         self.target_policy_noise = target_policy_noise
+        self.eval_env = eval_env
 
         self.graph = None
         self.replay_buffer = None
@@ -192,7 +195,8 @@ class TD3(OffPolicyRLModel):
                     # will be called only every n training steps,
                     # where n is the policy delay
                     policy_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate_ph)
-                    policy_train_op = policy_optimizer.minimize(policy_loss, var_list=tf_util.get_trainable_vars('model/pi'))
+                    policy_train_op = policy_optimizer.minimize(policy_loss,
+                                                                var_list=tf_util.get_trainable_vars('model/pi'))
                     self.policy_train_op = policy_train_op
 
                     # Q Values optimizer
@@ -272,7 +276,7 @@ class TD3(OffPolicyRLModel):
 
         return qf1_loss, qf2_loss
 
-    def learn(self, total_timesteps, callback=None,
+    def learn(self, total_timesteps, callback=None, eval_interval=10000,
               log_interval=4, tb_log_name="TD3", reset_num_timesteps=True, replay_wrapper=None):
 
         new_tb_log = self._init_num_timesteps(reset_num_timesteps)
@@ -407,6 +411,13 @@ class TD3(OffPolicyRLModel):
                     mean_reward = -np.inf
                 else:
                     mean_reward = round(float(np.mean(episode_rewards[-101:-1])), 1)
+
+                if step % eval_interval == 0 and self.eval_env is not None:
+                    mean_return, std_return = evaluate_policy(self, self.eval_env)
+                    logger.logkv('eval_ep_rewmean', mean_return)
+                    logger.logkv('eval_ep_rewstd', std_return)
+                    logger.logkv("total timesteps", self.num_timesteps)
+                    logger.dumpkvs()
 
                 # substract 1 as we appended a new term just now
                 num_episodes = len(episode_rewards) - 1

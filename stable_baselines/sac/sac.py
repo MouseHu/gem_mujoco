@@ -11,7 +11,7 @@ from stable_baselines.common.schedules import get_schedule_fn
 from stable_baselines.common.buffers import ReplayBuffer
 from stable_baselines.sac.policies import SACPolicy
 from stable_baselines import logger
-
+from stable_baselines.common.evaluation import evaluate_policy
 
 class SAC(OffPolicyRLModel):
     """
@@ -61,7 +61,7 @@ class SAC(OffPolicyRLModel):
     def __init__(self, policy, env, gamma=0.99, learning_rate=3e-4, buffer_size=50000,
                  learning_starts=100, train_freq=1, batch_size=64,
                  tau=0.005, ent_coef='auto', target_update_interval=1,
-                 gradient_steps=1, target_entropy='auto', action_noise=None,
+                 gradient_steps=1, target_entropy='auto', action_noise=None,eval_env=None,
                  random_exploration=0.0, verbose=0, tensorboard_log=None,
                  _init_setup_model=True, policy_kwargs=None, full_tensorboard_log=False,
                  seed=None, n_cpu_tf_sess=None):
@@ -100,6 +100,7 @@ class SAC(OffPolicyRLModel):
         self.policy_tf = None
         self.target_entropy = target_entropy
         self.full_tensorboard_log = full_tensorboard_log
+        self.eval_env = eval_env
 
         self.obs_target = None
         self.target_policy = None
@@ -351,7 +352,7 @@ class SAC(OffPolicyRLModel):
 
         return policy_loss, qf1_loss, qf2_loss, value_loss, entropy
 
-    def learn(self, total_timesteps, callback=None,
+    def learn(self, total_timesteps, callback=None, eval_interval =10000,
               log_interval=4, tb_log_name="SAC", reset_num_timesteps=True, replay_wrapper=None):
 
         new_tb_log = self._init_num_timesteps(reset_num_timesteps)
@@ -487,6 +488,13 @@ class SAC(OffPolicyRLModel):
                     mean_reward = -np.inf
                 else:
                     mean_reward = round(float(np.mean(episode_rewards[-101:-1])), 1)
+
+                if step % eval_interval == 0 and self.eval_env is not None:
+                    mean_return, std_return = evaluate_policy(self, self.eval_env)
+                    logger.logkv('eval_ep_rewmean', mean_return)
+                    logger.logkv('eval_ep_rewstd', std_return)
+                    logger.logkv("total timesteps", self.num_timesteps)
+                    logger.dumpkvs()
 
                 # substract 1 as we appended a new term just now
                 num_episodes = len(episode_rewards) - 1 
