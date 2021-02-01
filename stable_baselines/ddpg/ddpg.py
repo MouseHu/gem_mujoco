@@ -894,7 +894,7 @@ class DDPG(OffPolicyRLModel):
                                 unscaled_action = unscale_action(self.action_space, action)
 
                             new_obs, reward, done, info = self.env.step(unscaled_action)
-
+                            done = info.get("truly_done", done)
                             self.num_timesteps += 1
                             callback.update_locals(locals())
                             if callback.on_step() is False:

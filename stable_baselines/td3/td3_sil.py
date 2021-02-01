@@ -339,7 +339,7 @@ class TD3SIL(OffPolicyRLModel):
                 assert action.shape == self.env.action_space.shape
 
                 new_obs, reward, done, info = self.env.step(unscaled_action)
-
+                done = info.get("truly_done", done)
                 self.num_timesteps += 1
 
                 # Only stop training if return value is False, not when it is None. This is for backwards
