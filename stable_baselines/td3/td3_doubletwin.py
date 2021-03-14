@@ -6,16 +6,15 @@ import tensorflow as tf
 
 from stable_baselines import logger
 from stable_baselines.common import tf_util, OffPolicyRLModel, SetVerbosity, TensorboardWriter
-from stable_baselines.common.vec_env import VecEnv
+from stable_baselines.common.buffers import ReplayBuffer
+from stable_baselines.common.evaluation import evaluate_policy
 from stable_baselines.common.math_util import safe_mean, unscale_action, scale_action
 from stable_baselines.common.schedules import get_schedule_fn
-from stable_baselines.common.buffers import ReplayBuffer
+from stable_baselines.common.vec_env import VecEnv
 from stable_baselines.td3.policies import TD3Policy
-from stable_baselines.common.evaluation import evaluate_policy
-from stable_baselines.common.self_imitation import SelfImitation
 
 
-class TD3SIL(OffPolicyRLModel):
+class TD3DoubleTwin(OffPolicyRLModel):
     """
     Twin Delayed DDPG (TD3)
     Addressing Function Approximation Error in Actor-Critic Methods.
@@ -66,9 +65,9 @@ class TD3SIL(OffPolicyRLModel):
                  _init_setup_model=True, policy_kwargs=None,
                  full_tensorboard_log=False, seed=None, n_cpu_tf_sess=None):
 
-        super(TD3SIL, self).__init__(policy=policy, env=env, replay_buffer=None, verbose=verbose,
-                                     policy_base=TD3Policy, requires_vec_env=False, policy_kwargs=policy_kwargs,
-                                     seed=seed, n_cpu_tf_sess=n_cpu_tf_sess)
+        super(TD3DoubleTwin, self).__init__(policy=policy, env=env, replay_buffer=None, verbose=verbose,
+                                            policy_base=TD3Policy, requires_vec_env=False, policy_kwargs=policy_kwargs,
+                                            seed=seed, n_cpu_tf_sess=n_cpu_tf_sess)
 
         self.buffer_size = buffer_size
         self.learning_rate = learning_rate
@@ -113,8 +112,7 @@ class TD3SIL(OffPolicyRLModel):
         self.policy_out = None
         self.policy_train_op = None
         self.policy_loss = None
-        self.sil = None
-
+        self.clip_norm = None
         if _init_setup_model:
             self.setup_model()
 
@@ -157,10 +155,15 @@ class TD3SIL(OffPolicyRLModel):
                     # Create the policy
                     self.policy_out = policy_out = self.policy_tf.make_actor(self.processed_obs_ph)
                     # Use two Q-functions to improve performance by reducing overestimation bias
-                    qf1, qf2 = self.policy_tf.make_critics(self.processed_obs_ph, self.actions_ph)
+                    qf1_a, qf1_b = self.policy_tf.make_critics(self.processed_obs_ph, self.actions_ph,
+                                                               scope="values_fn_1")
+                    qf2_a, qf2_b = self.policy_tf.make_critics(self.processed_obs_ph, self.actions_ph,
+                                                               scope="values_fn_2")
                     # Q value when following the current policy
-                    qf1_pi, qf2_pi = self.policy_tf.make_critics(self.processed_obs_ph,
-                                                                 policy_out, reuse=True)
+                    qf1_a_pi, qf1_b_pi = self.policy_tf.make_critics(self.processed_obs_ph,
+                                                                     policy_out, reuse=True, scope="values_fn_1")
+                    qf2_a_pi, qf2_b_pi = self.policy_tf.make_critics(self.processed_obs_ph,
+                                                                     policy_out, reuse=True, scope="values_fn_2")
 
                 with tf.variable_scope("target", reuse=False):
                     # Create target networks
@@ -171,41 +174,85 @@ class TD3SIL(OffPolicyRLModel):
                     # Clip the noisy action to remain in the bounds [-1, 1] (output of a tanh)
                     noisy_target_action = tf.clip_by_value(target_policy_out + target_noise, -1, 1)
                     # Q values when following the target policy
-                    qf1_target, qf2_target = self.target_policy_tf.make_critics(self.processed_next_obs_ph,
-                                                                                noisy_target_action)
+                    qf1_a_target, qf1_b_target = self.target_policy_tf.make_critics(self.processed_next_obs_ph,
+                                                                                    noisy_target_action,
+                                                                                    scope="values_fn_1")
+                    qf2_a_target, qf2_b_target = self.target_policy_tf.make_critics(self.processed_next_obs_ph,
+                                                                                    noisy_target_action,
+                                                                                    scope="values_fn_2")
 
                 with tf.variable_scope("loss", reuse=False):
                     # Take the min of the two target Q-Values (clipped Double-Q Learning)
-                    min_qf_target = tf.minimum(qf1_target, qf2_target)
+                    min_qf_target_1 = tf.minimum(qf1_a_target, qf1_b_target)
+                    min_qf_target_2 = tf.minimum(qf2_a_target, qf2_b_target)
 
                     # Targets for Q value regression
-                    q_backup = tf.stop_gradient(
+                    q_backup_1 = tf.stop_gradient(
                         self.rewards_ph +
-                        (1 - self.terminals_ph) * self.gamma * min_qf_target
+                        (1 - self.terminals_ph) * self.gamma * min_qf_target_1
                     )
-
-                    # Compute Q-Function loss
-                    qf1_loss = tf.reduce_mean((q_backup - qf1) ** 2)
-                    qf2_loss = tf.reduce_mean((q_backup - qf2) ** 2)
+                    q_backup_2 = tf.stop_gradient(
+                        self.rewards_ph +
+                        (1 - self.terminals_ph) * self.gamma * min_qf_target_2
+                    )
+                    q_backup = tf.maximum(q_backup_1, q_backup_2)
+                    # Compute Q-Function lossf
+                    alpha = .5
+                    qfs_loss_1_a = tf.reduce_mean(
+                        tf.nn.leaky_relu(qf1_a - q_backup, alpha=alpha) ** 2)
+                    qfs_loss_1_b = tf.reduce_mean(
+                        tf.nn.leaky_relu(qf1_b - q_backup, alpha=alpha) ** 2)
+                    qfs_loss_2_a = tf.reduce_mean(
+                        tf.nn.leaky_relu(qf2_a - q_backup, alpha=alpha) ** 2)
+                    qfs_loss_2_b = tf.reduce_mean(
+                        tf.nn.leaky_relu(qf2_b - q_backup, alpha=alpha) ** 2)
+                    qf1_loss = tf.reduce_mean(qfs_loss_1_a + qfs_loss_1_b)
+                    qf2_loss = tf.reduce_mean(qfs_loss_2_a + qfs_loss_2_b)
 
                     qvalues_losses = qf1_loss + qf2_loss
 
                     # Policy loss: maximise q value
-                    self.policy_loss = policy_loss = -tf.reduce_mean(qf1_pi)
+                    self.policy_loss = policy_loss = -tf.reduce_mean(tf.stack([qf1_a_pi, qf1_b_pi, qf2_a_pi, qf2_b_pi]))
 
                     # Policy train op
                     # will be called only every n training steps,
                     # where n is the policy delay
                     policy_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate_ph)
-                    policy_train_op = policy_optimizer.minimize(policy_loss,
-                                                                var_list=tf_util.get_trainable_vars('model/pi'))
+
+                    gvs = policy_optimizer.compute_gradients(policy_loss, tf_util.get_trainable_vars('model/pi'))
+                    policy_grad_norm_mean = tf.reduce_mean(
+                        tf.stack([tf.linalg.norm(grad) for grad, var in gvs], axis=0),
+                        axis=0)
+                    policy_grad_norm_max = tf.reduce_max(tf.stack([tf.linalg.norm(grad) for grad, var in gvs], axis=0),
+                                                         axis=0)
+                    vars = [var for grad, var in gvs]
+                    # grads = tf.gradients(qvalues_losses, qvalues_params)
+                    if self.clip_norm is not None:
+                        grads = [tf.clip_by_norm(grad, clip_norm=self.clip_norm) for grad, var in gvs]
+                        policy_train_op = policy_optimizer.apply_gradients(zip(grads, vars))
+                    else:
+                        policy_train_op = policy_optimizer.minimize(policy_loss,
+                                                                    var_list=tf_util.get_trainable_vars('model/pi'))
                     self.policy_train_op = policy_train_op
 
                     # Q Values optimizer
-                    qvalues_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate_ph)
-                    qvalues_params = tf_util.get_trainable_vars('model/values_fn/')
 
-                    # sil_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate_ph)
+                    qvalues_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate_ph)
+                    qvalues_params = tf_util.get_trainable_vars('model/values_fn_1/') + tf_util.get_trainable_vars(
+                        'model/values_fn_2/')
+
+                    gvs = qvalues_optimizer.compute_gradients(qvalues_losses, qvalues_params)
+                    grad_norm_mean = tf.reduce_mean(tf.stack([tf.linalg.norm(grad) for grad, var in gvs], axis=0),
+                                                    axis=0)
+                    grad_norm_max = tf.reduce_max(tf.stack([tf.linalg.norm(grad) for grad, var in gvs], axis=0), axis=0)
+                    vars = [var for grad, var in gvs]
+                    # grads = tf.gradients(qvalues_losses, qvalues_params)
+                    if self.clip_norm is not None:
+                        grads = [tf.clip_by_norm(grad, clip_norm=self.clip_norm) for grad, var in gvs]
+                        train_values_op = qvalues_optimizer.apply_gradients(zip(grads, vars))
+                    else:
+                        train_values_op = qvalues_optimizer.minimize(qvalues_losses, var_list=qvalues_params)
+
                     # Q Values and policy target params
                     source_params = tf_util.get_trainable_vars("model/")
                     target_params = tf_util.get_trainable_vars("target/")
@@ -222,23 +269,21 @@ class TD3SIL(OffPolicyRLModel):
                         for target, source in zip(target_params, source_params)
                     ]
 
-                    train_values_op = qvalues_optimizer.minimize(qvalues_losses, var_list=qvalues_params)
-
-                    self.infos_names = ['qf1_loss', 'qf2_loss']
+                    self.infos_names = ['qf1_loss', 'qf2_loss', 'q_grad_norm_mean', 'q_grad_norm_max',
+                                        'policy_grad_norm_mean', 'policy_grad_norm_max']
                     # All ops to call during one training step
-                    self.step_ops = [qf1_loss, qf2_loss,
-                                     qf1, qf2, train_values_op]
+                    self.step_ops = [qf1_loss, qf2_loss, grad_norm_mean, grad_norm_max,
+                                     policy_grad_norm_mean, policy_grad_norm_max,
+                                     qf1_a, qf1_b, qf2_a, qf2_b, train_values_op]
 
                     # Monitor losses and entropy in tensorboard
                     tf.summary.scalar('policy_loss', policy_loss)
                     tf.summary.scalar('qf1_loss', qf1_loss)
                     tf.summary.scalar('qf2_loss', qf2_loss)
+                    tf.summary.scalar('grad_norm_mean', grad_norm_mean)
+                    tf.summary.scalar('grad_norm_max', grad_norm_max)
                     tf.summary.scalar('learning_rate', tf.reduce_mean(self.learning_rate_ph))
-                self.sil = SelfImitation(self.processed_obs_ph, qf1_pi, qf2_pi, self.policy_out, ac_ph=self.actions_ph,
-                                         batch_size=self.batch_size)
 
-                self.sil.set_loss_weight(0.1)
-                self.sil.build_train_op(qvalues_params, qvalues_optimizer, self.learning_rate_ph)
                 # Retrieve parameters that must be saved
                 self.params = tf_util.get_trainable_vars("model")
                 self.target_params = tf_util.get_trainable_vars("target/")
@@ -279,9 +324,9 @@ class TD3SIL(OffPolicyRLModel):
             out = self.sess.run(step_ops, feed_dict)
 
         # Unpack to monitor losses
-        qf1_loss, qf2_loss, *_values = out
+        qf1_loss, qf2_loss, grad_norm_mean, grad_norm_max, policy_grad_norm_mean, policy_grad_norm_max, *_values = out
 
-        return qf1_loss, qf2_loss
+        return qf1_loss, qf2_loss, grad_norm_mean, grad_norm_max, policy_grad_norm_mean, policy_grad_norm_max
 
     def learn(self, total_timesteps, callback=None, eval_interval=10000,
               log_interval=4, tb_log_name="TD3", reset_num_timesteps=True, replay_wrapper=None):
@@ -358,8 +403,6 @@ class TD3SIL(OffPolicyRLModel):
 
                 # Store transition in the replay buffer.
                 self.replay_buffer_add(obs_, action, reward_, new_obs_, truly_done, info)
-                self.sil.step(np.array(obs_).reshape(1, -1), np.array(action).reshape(1, -1),
-                              np.array(reward_).reshape(-1), np.array(truly_done).reshape(-1))
                 obs = new_obs
                 # Save the unnormalized observation
                 if self._vec_normalize_env is not None:
@@ -377,7 +420,6 @@ class TD3SIL(OffPolicyRLModel):
                     tf_util.total_episode_reward_logger(self.episode_reward, ep_reward,
                                                         ep_done, writer, self.num_timesteps)
 
-                sil_loss, sil_adv, sil_samples = None, None, None
                 if self.num_timesteps % self.train_freq == 0:
                     callback.on_rollout_end()
 
@@ -398,7 +440,7 @@ class TD3SIL(OffPolicyRLModel):
                         # this is controlled by the `policy_delay` parameter
                         mb_infos_vals.append(
                             self._train_step(step, writer, current_lr, (step + grad_step) % self.policy_delay == 0))
-                    sil_loss, sil_adv, sil_samples = self.sil.train(self.sess, current_lr)
+
                     # Log losses and entropy, useful for monitor training
                     if len(mb_infos_vals) > 0:
                         infos_values = np.mean(mb_infos_vals, axis=0)
@@ -449,10 +491,6 @@ class TD3SIL(OffPolicyRLModel):
                         for (name, val) in zip(self.infos_names, infos_values):
                             logger.logkv(name, val)
                     logger.logkv("total timesteps", self.num_timesteps)
-                    if sil_loss is not None:
-                        logger.logkv("sil_loss", sil_loss)
-                        logger.logkv("sil_adv", sil_adv)
-                        logger.logkv("sil_samples", sil_samples)
                     logger.dumpkvs()
                     # Reset infos:
                     infos_values = []

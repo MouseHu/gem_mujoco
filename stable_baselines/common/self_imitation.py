@@ -3,8 +3,8 @@ import tensorflow as tf
 import random
 from gym import spaces
 
-from baselines.common.segment_tree import SumSegmentTree, MinSegmentTree
-from baselines.a2c.utils import discount_with_dones
+from stable_baselines.common.segment_tree import SumSegmentTree, MinSegmentTree
+from stable_baselines.a2c.a2c import discount_with_dones
 
 
 class ReplayBuffer(object):
@@ -151,6 +151,8 @@ class PrioritizedReplayBuffer(ReplayBuffer):
             weights = np.array(weights)
         else:
             weights = np.ones_like(idxes, dtype=np.float32)
+        idxes = np.array(idxes).reshape(-1)
+        # print(batch_size,idxes)
         encoded_sample = self._encode_sample(idxes)
         return tuple(list(encoded_sample) + [weights, idxes])
 
@@ -180,7 +182,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
 class SelfImitation(object):
 
-    def __init__(self, model_ob,model_qf1, model_qf2, model_pif, ac_space, fn_reward=None, fn_obs=None,
+    def __init__(self, model_ob,model_qf1, model_qf2, model_pif, ac_ph, fn_reward=None, fn_obs=None,
                  n_env=1, batch_size=512, n_update=4,
                  clip=1, w_value=0.01, w_entropy=0.01,
                  max_steps=int(1e5), gamma=0.99,
@@ -215,17 +217,10 @@ class SelfImitation(object):
         self.total_rewards = []
         self.running_episodes = [[] for _ in range(n_env)]
 
-        if isinstance(ac_space, spaces.Box):
-            # Continuous control
-            self.A = tf.placeholder(tf.float32, [None, ac_space.shape[0]])
-        elif isinstance(ac_space, spaces.Discrete):
-            # Discrete control
-            self.A = tf.placeholder(tf.int32, [None])
-        else:
-            raise NotImplementedError
+        self.A = ac_ph
 
-        self.R = tf.placeholder(tf.float32, [None])
-        self.W = tf.placeholder(tf.float32, [None])
+        self.R = tf.placeholder(tf.float32, [None,1],name='return')
+        self.W = tf.placeholder(tf.float32, [None,1],name='weight')
         self.build_loss_op()
 
     def set_loss_weight(self, w):
@@ -289,6 +284,7 @@ class SelfImitation(object):
     def step(self, obs, actions, rewards, dones):
         for n in range(self.n_env):
             if self.n_update > 0:
+                # print(obs,actions,rewards)
                 self.running_episodes[n].append([obs[n], actions[n], rewards[n]])
             else:
                 self.running_episodes[n].append([None, actions[n], rewards[n]])
@@ -307,17 +303,18 @@ class SelfImitation(object):
 
     def build_loss_op(self):
         # in deterministic case, we ignore the policy part
-        mask_1 = tf.where(self.R - tf.squeeze(self.model_qf1) > 0.0,
+        # print(self.model_qf1.shape)
+        mask_1 = tf.where(self.R - self.model_qf1 > 0.0,
                         tf.ones_like(self.R), tf.zeros_like(self.R))
-        mask_2 = tf.where(self.R - tf.squeeze(self.model_qf1) > 0.0,
+        mask_2 = tf.where(self.R - self.model_qf2 > 0.0,
                         tf.ones_like(self.R), tf.zeros_like(self.R))
         self.num_valid_samples = (tf.reduce_sum(mask_1)+tf.reduce_sum(mask_2))/2
         self.num_samples = tf.maximum(self.num_valid_samples, self.min_batch_size)
 
         self.adv = 1/2*tf.stop_gradient(
-            tf.clip_by_value(self.R - tf.squeeze(self.model_qf1), 0.0, self.clip))
+            tf.clip_by_value(self.R - self.model_qf1, 0.0, self.clip))
         self.adv += 1/2*tf.stop_gradient(
-            tf.clip_by_value(self.R - tf.squeeze(self.model_qf2), 0.0, self.clip))
+            tf.clip_by_value(self.R - self.model_qf2, 0.0, self.clip))
         self.mean_adv = tf.reduce_sum(self.adv) / self.num_samples
 
         # Value update
@@ -343,15 +340,15 @@ class SelfImitation(object):
     def _train(self, sess, lr):
         obs, actions, returns, weights, idxes = self.sample_batch(self.batch_size)
         if obs is None:
-            return 0, 0, 0, 0
-
+            return 0, 0, 0
+        # print(obs.shape,actions.shape,returns.shape)
         loss, adv, mean_adv, samples, _ = sess.run(
             [self.loss, self.adv,self.mean_adv,self.num_valid_samples,self.train_op],
             {self.model_ob: obs,
              self.A: actions,
-             self.R: returns,
+             self.R: returns.reshape(-1,1),
              self.LR: lr,
-             self.W: weights})
+             self.W: weights.reshape(-1,1)})
 
         self.buffer.update_priorities(idxes, adv)
         return loss, mean_adv, samples

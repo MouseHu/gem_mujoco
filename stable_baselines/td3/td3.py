@@ -332,7 +332,7 @@ class TD3(OffPolicyRLModel):
                 assert action.shape == self.env.action_space.shape
 
                 new_obs, reward, done, info = self.env.step(unscaled_action)
-                done = info.get("truly_done", done)
+                truly_done = info.get("truly_done", done)
                 self.num_timesteps += 1
 
                 # Only stop training if return value is False, not when it is None. This is for backwards
@@ -350,7 +350,7 @@ class TD3(OffPolicyRLModel):
                     obs_, new_obs_, reward_ = obs, new_obs, reward
 
                 # Store transition in the replay buffer.
-                self.replay_buffer_add(obs_, action, reward_, new_obs_, done, info)
+                self.replay_buffer_add(obs_, action, reward_, new_obs_, truly_done, info)
                 obs = new_obs
                 # Save the unnormalized observation
                 if self._vec_normalize_env is not None:

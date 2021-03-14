@@ -79,7 +79,7 @@ class SegmentTree(object):
         # indexes of the leaf
         idxs = idx + self._capacity
         self._value[idxs] = val
-        if isinstance(idxs, int):
+        if isinstance(idxs, int) or isinstance(idxs,np.int64):
             idxs = np.array([idxs])
         # go up one level in the tree and remove duplicate indexes
         idxs = unique(idxs // 2)

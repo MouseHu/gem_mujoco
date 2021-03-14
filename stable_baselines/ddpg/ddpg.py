@@ -199,6 +199,7 @@ class DDPG(OffPolicyRLModel):
     """
 
     def __init__(self, policy, env, gamma=0.99, memory_policy=None, eval_env=None, nb_train_steps=50,
+                 learning_starts = 0,
                  nb_rollout_steps=100, nb_eval_steps=100, param_noise=None, action_noise=None,
                  normalize_observations=False, tau=0.001, batch_size=128, param_noise_adaption_interval=50,
                  normalize_returns=False, enable_popart=False, observation_range=(-5., 5.), critic_l2_reg=0.,
@@ -215,7 +216,7 @@ class DDPG(OffPolicyRLModel):
         # Parameters.
         self.gamma = gamma
         self.tau = tau
-
+        self.learning_starts = learning_starts
         # TODO: remove this param in v3.x.x
         if memory_policy is not None:
             warnings.warn("memory_policy will be removed in a future version (v3.x.x) "
@@ -884,9 +885,11 @@ class DDPG(OffPolicyRLModel):
 
                             # Randomly sample actions from a uniform distribution
                             # with a probability self.random_exploration (used in HER + DDPG)
-                            if np.random.rand() < self.random_exploration:
+                            # print(total_steps,self.learning_starts)
+                            if (np.random.rand() < self.random_exploration) or (total_steps < self.learning_starts):
                                 # actions sampled from action space are from range specific to the environment
                                 # but algorithm operates on tanh-squashed actions therefore simple scaling is used
+                                # print("random")
                                 unscaled_action = self.action_space.sample()
                                 action = scale_action(self.action_space, unscaled_action)
                             else:
@@ -894,12 +897,19 @@ class DDPG(OffPolicyRLModel):
                                 unscaled_action = unscale_action(self.action_space, action)
 
                             new_obs, reward, done, info = self.env.step(unscaled_action)
-                            done = info.get("truly_done", done)
+                            truly_done = info.get("truly_done", done)
                             self.num_timesteps += 1
                             callback.update_locals(locals())
                             if callback.on_step() is False:
                                 callback.on_training_end()
                                 return self
+
+                            if total_steps % eval_interval == 0 and self.eval_env is not None:
+                                mean_return, std_return = evaluate_policy(self, self.eval_env)
+                                logger.logkv('eval_ep_rewmean', mean_return)
+                                logger.logkv('eval_ep_rewstd', std_return)
+                                logger.logkv("total timesteps", self.num_timesteps)
+                                logger.dumpkvs()
 
                             step += 1
                             total_steps += 1
@@ -918,7 +928,7 @@ class DDPG(OffPolicyRLModel):
                                 # Avoid changing the original ones
                                 obs_, new_obs_, reward_ = obs, new_obs, reward
 
-                            self._store_transition(obs_, action, reward_, new_obs_, done, info)
+                            self._store_transition(obs_, action, reward_, new_obs_, truly_done, info)
                             obs = new_obs
                             # Save the unnormalized observation
                             if self._vec_normalize_env is not None:
@@ -1001,12 +1011,7 @@ class DDPG(OffPolicyRLModel):
                         #             eval_episode_rewards_history.append(eval_episode_reward)
                         #             eval_episode_reward = 0.
 
-                        if step % eval_interval == 0 and self.eval_env is not None:
-                            mean_return, std_return = evaluate_policy(self, self.eval_env)
-                            logger.logkv('eval_ep_rewmean', mean_return)
-                            logger.logkv('eval_ep_rewstd', std_return)
-                            logger.logkv("total timesteps", self.num_timesteps)
-                            logger.dumpkvs()
+
                     mpi_size = MPI.COMM_WORLD.Get_size()
 
                     # Not enough samples in the replay buffer
@@ -1019,6 +1024,7 @@ class DDPG(OffPolicyRLModel):
                     stats = self._get_stats()
                     combined_stats = stats.copy()
                     combined_stats['rollout/return'] = np.mean(epoch_episode_rewards)
+                    combined_stats['ep_rewmean'] = np.mean(epoch_episode_rewards)
                     combined_stats['rollout/return_history'] = np.mean(episode_rewards_history)
                     combined_stats['rollout/episode_steps'] = np.mean(epoch_episode_steps)
                     combined_stats['rollout/actions_mean'] = np.mean(epoch_actions)
@@ -1062,6 +1068,7 @@ class DDPG(OffPolicyRLModel):
                     # Total statistics.
                     combined_stats['total/epochs'] = epoch + 1
                     combined_stats['total/steps'] = step
+                    combined_stats["total timesteps"] = step
 
                     for key in sorted(combined_stats.keys()):
                         logger.record_tabular(key, combined_stats[key])

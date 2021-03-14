@@ -1,25 +1,27 @@
-import os
-import glob
 import json
-import zipfile
+import os
+import time
 import warnings
+import zipfile
 from abc import ABC, abstractmethod
 from collections import OrderedDict, deque
-from typing import Union, List, Callable, Optional
 
-import gym
 import cloudpickle
+import glob
+import gym
 import numpy as np
 import tensorflow as tf
+from typing import Union, List, Callable, Optional
 
+from stable_baselines import logger
+from stable_baselines.common.callbacks import BaseCallback, CallbackList, ConvertCallback
+from stable_baselines.common.math_util import safe_mean, unscale_action, reward2return
 from stable_baselines.common.misc_util import set_global_seeds
-from stable_baselines.common.save_util import data_to_json, json_to_data, params_to_bytes, bytes_to_params
 from stable_baselines.common.policies import get_policy_from_name, ActorCriticPolicy
 from stable_baselines.common.runners import AbstractEnvRunner
+from stable_baselines.common.save_util import data_to_json, json_to_data, params_to_bytes, bytes_to_params
 from stable_baselines.common.vec_env import (VecEnvWrapper, VecEnv, DummyVecEnv,
                                              VecNormalize, unwrap_vec_normalize)
-from stable_baselines.common.callbacks import BaseCallback, CallbackList, ConvertCallback
-from stable_baselines import logger
 
 
 class BaseRLModel(ABC):
@@ -63,7 +65,7 @@ class BaseRLModel(ABC):
         self.n_cpu_tf_sess = n_cpu_tf_sess
         self.episode_reward = None
         self.ep_info_buf = None
-
+        self.eval_ep_info_buf = None
         if env is not None:
             if isinstance(env, str):
                 if self.verbose >= 1:
@@ -184,8 +186,8 @@ class BaseRLModel(ABC):
         pass
 
     def _init_callback(self,
-                      callback: Union[None, Callable, List[BaseCallback], BaseCallback]
-                      ) -> BaseCallback:
+                       callback: Union[None, Callable, List[BaseCallback], BaseCallback]
+                       ) -> BaseCallback:
         """
         :param callback: (Union[None, Callable, List[BaseCallback], BaseCallback])
         :return: (BaseCallback)
@@ -228,6 +230,8 @@ class BaseRLModel(ABC):
             self.episode_reward = np.zeros((self.n_envs,))
         if self.ep_info_buf is None:
             self.ep_info_buf = deque(maxlen=100)
+        if self.eval_ep_info_buf is None:
+            self.eval_ep_info_buf = deque(maxlen=100)
 
     @abstractmethod
     def get_parameter_list(self):
@@ -863,7 +867,7 @@ class ActorCriticRLModel(BaseRLModel):
                 # Discrete action probability, over multiple categories
                 actions = np.swapaxes(actions, 0, 1)  # swap axis for easier categorical split
                 prob = np.prod([proba[np.arange(act.shape[0]), act]
-                                         for proba, act in zip(actions_proba, actions)], axis=0)
+                                for proba, act in zip(actions_proba, actions)], axis=0)
 
             elif isinstance(self.action_space, gym.spaces.MultiBinary):
                 actions = actions.reshape((-1, self.action_space.n))
@@ -873,7 +877,7 @@ class ActorCriticRLModel(BaseRLModel):
                 prob = np.prod(actions_proba * actions + (1 - actions_proba) * (1 - actions), axis=1)
 
             elif isinstance(self.action_space, gym.spaces.Box):
-                actions = actions.reshape((-1, ) + self.action_space.shape)
+                actions = actions.reshape((-1,) + self.action_space.shape)
                 mean, std = actions_proba
                 logstd = np.log(std)
 
@@ -978,6 +982,10 @@ class OffPolicyRLModel(BaseRLModel):
                                                seed=seed, n_cpu_tf_sess=n_cpu_tf_sess)
 
         self.replay_buffer = replay_buffer
+        self.eval_env = None
+        self.eval_episode_rewards = []
+        self.eval_discount_episode_rewards = []
+        self.gamma = None
 
     def is_using_her(self) -> bool:
         """
@@ -1057,6 +1065,80 @@ class OffPolicyRLModel(BaseRLModel):
         model.load_parameters(params)
 
         return model
+
+    def compute_q(self, state, action):
+        return None
+
+    def step(self, obs):
+        return None
+
+    def evaluate(self, nb_trajs):
+        # print("begin_evaluation")
+        # print(self.eval_env)
+        start_time = time.time()
+        eval_discount_episode_rewards, eval_qs, eval_returns = [], [], []
+        self.eval_ep_info_buf.clear()
+        eval_step, eval_num_traj = 0, 0
+
+        if self.eval_env is not None:
+            eval_episode_reward, eval_discount_episode_reward = 0., 0.
+            eval_q, eval_return = [], []
+            eval_obs = self.eval_env.reset()
+            # print("begin ",self.eval_env)
+            while True:
+                eval_action = self.step(eval_obs[None])
+                unscaled_action = unscale_action(self.action_space, eval_action)
+                eval_obs, eval_r, eval_done, eval_info = self.eval_env.step(unscaled_action)
+                eval_episode_reward += eval_r
+                eval_discount_episode_reward += eval_r * self.gamma ** eval_step
+                eval_return.append(eval_r)
+                q = self.compute_q(eval_obs, eval_action)
+                eval_q.append(q)
+                # Retrieve reward and episode length if using Monitor wrapper
+                eval_maybe_ep_info = eval_info.get('episode')
+                if eval_maybe_ep_info is not None:
+                    self.eval_ep_info_buf.extend([eval_maybe_ep_info])
+                eval_step += 1
+                if eval_done:
+                    eval_num_traj += 1
+                    eval_step = 0.
+                    eval_return = reward2return(eval_return)
+                    if not isinstance(self.env, VecEnv):
+                        eval_obs = self.eval_env.reset()
+
+                    self.eval_episode_rewards.append(eval_episode_reward)
+                    eval_discount_episode_rewards.append(eval_discount_episode_reward)
+
+                    eval_qs.append(eval_q)
+                    eval_returns.append(eval_return)
+                    eval_episode_reward, eval_discount_episode_reward = 0., 0.
+                    eval_q, eval_return = [], []
+
+                    if eval_num_traj > nb_trajs:
+                        break
+
+            if len(self.eval_episode_rewards[-101:-1]) == 0:
+                eval_mean_reward = -np.inf
+            else:
+                eval_mean_reward = round(float(np.mean(self.eval_episode_rewards[-101:-1])), 1)
+
+            logger.logkv("eval mean 100 episode reward", eval_mean_reward)
+            if len(self.eval_ep_info_buf) > 0 and len(self.eval_ep_info_buf[0]) > 0:
+                logger.logkv('eval_ep_rewmean',
+                             safe_mean([ep_info['r'] for ep_info in self.eval_ep_info_buf]))
+                logger.logkv('eval_eplenmean',
+                             safe_mean([ep_info['l'] for ep_info in self.eval_ep_info_buf]))
+            logger.logkv('eval_time_elapsed', int(time.time() - start_time))
+            logger.logkv('eval_discount_q', np.mean(eval_discount_episode_rewards))
+            logger.logkv('eval_qs', np.mean([np.mean(qs) for qs in eval_qs]))
+            logger.logkv('eval_qs_difference',
+                         safe_mean([np.mean(x) - np.mean(y) for x, y in zip(eval_qs, eval_returns)]))
+            logger.logkv('eval_abs_qs_difference',
+                         safe_mean(
+                             [np.mean(np.abs([a - b for a, b in zip(x, y)])) for x, y in zip(eval_qs, eval_returns)]))
+            logger.logkv("total timesteps", self.num_timesteps)
+            logger.dumpkvs()
+            # print("finish logging")
 
 
 class _UnvecWrapper(VecEnvWrapper):

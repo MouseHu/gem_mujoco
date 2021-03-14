@@ -9,13 +9,12 @@ from stable_baselines.common import tf_util, OffPolicyRLModel, SetVerbosity, Ten
 from stable_baselines.common.vec_env import VecEnv
 from stable_baselines.common.math_util import safe_mean, unscale_action, scale_action
 from stable_baselines.common.schedules import get_schedule_fn
-from stable_baselines.common.buffers import ReplayBuffer
+from stable_baselines.common.buffers import ReplayBuffer, NStepReplayBuffer
 from stable_baselines.td3.policies import TD3Policy
 from stable_baselines.common.evaluation import evaluate_policy
-from stable_baselines.common.self_imitation import SelfImitation
 
 
-class TD3SIL(OffPolicyRLModel):
+class TD3NSTEP(OffPolicyRLModel):
     """
     Twin Delayed DDPG (TD3)
     Addressing Function Approximation Error in Actor-Critic Methods.
@@ -61,14 +60,14 @@ class TD3SIL(OffPolicyRLModel):
     def __init__(self, policy, env, gamma=0.99, learning_rate=3e-4, buffer_size=50000,
                  learning_starts=100, train_freq=100, gradient_steps=100, batch_size=128,
                  tau=0.005, policy_delay=2, action_noise=None, eval_env=None,
-                 target_policy_noise=0.2, target_noise_clip=0.5,
+                 target_policy_noise=0.2, target_noise_clip=0.5, num_step=5,
                  random_exploration=0.0, verbose=0, tensorboard_log=None,
                  _init_setup_model=True, policy_kwargs=None,
                  full_tensorboard_log=False, seed=None, n_cpu_tf_sess=None):
 
-        super(TD3SIL, self).__init__(policy=policy, env=env, replay_buffer=None, verbose=verbose,
-                                     policy_base=TD3Policy, requires_vec_env=False, policy_kwargs=policy_kwargs,
-                                     seed=seed, n_cpu_tf_sess=n_cpu_tf_sess)
+        super(TD3NSTEP, self).__init__(policy=policy, env=env, replay_buffer=None, verbose=verbose,
+                                       policy_base=TD3Policy, requires_vec_env=False, policy_kwargs=policy_kwargs,
+                                       seed=seed, n_cpu_tf_sess=n_cpu_tf_sess)
 
         self.buffer_size = buffer_size
         self.learning_rate = learning_rate
@@ -84,6 +83,7 @@ class TD3SIL(OffPolicyRLModel):
         self.target_noise_clip = target_noise_clip
         self.target_policy_noise = target_policy_noise
         self.eval_env = eval_env
+        self.num_step = num_step
 
         self.graph = None
         self.replay_buffer = None
@@ -113,7 +113,6 @@ class TD3SIL(OffPolicyRLModel):
         self.policy_out = None
         self.policy_train_op = None
         self.policy_loss = None
-        self.sil = None
 
         if _init_setup_model:
             self.setup_model()
@@ -131,7 +130,7 @@ class TD3SIL(OffPolicyRLModel):
                 self.set_random_seed(self.seed)
                 self.sess = tf_util.make_session(num_cpu=self.n_cpu_tf_sess, graph=self.graph)
 
-                self.replay_buffer = ReplayBuffer(self.buffer_size)
+                self.replay_buffer = NStepReplayBuffer(self.buffer_size, num_step=self.num_step)
 
                 with tf.variable_scope("input", reuse=False):
                     # Create policy and target TF objects
@@ -159,8 +158,8 @@ class TD3SIL(OffPolicyRLModel):
                     # Use two Q-functions to improve performance by reducing overestimation bias
                     qf1, qf2 = self.policy_tf.make_critics(self.processed_obs_ph, self.actions_ph)
                     # Q value when following the current policy
-                    qf1_pi, qf2_pi = self.policy_tf.make_critics(self.processed_obs_ph,
-                                                                 policy_out, reuse=True)
+                    qf1_pi, _ = self.policy_tf.make_critics(self.processed_obs_ph,
+                                                            policy_out, reuse=True)
 
                 with tf.variable_scope("target", reuse=False):
                     # Create target networks
@@ -181,7 +180,7 @@ class TD3SIL(OffPolicyRLModel):
                     # Targets for Q value regression
                     q_backup = tf.stop_gradient(
                         self.rewards_ph +
-                        (1 - self.terminals_ph) * self.gamma * min_qf_target
+                        (1 - self.terminals_ph) * (self.gamma ** self.num_step) * min_qf_target
                     )
 
                     # Compute Q-Function loss
@@ -205,7 +204,6 @@ class TD3SIL(OffPolicyRLModel):
                     qvalues_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate_ph)
                     qvalues_params = tf_util.get_trainable_vars('model/values_fn/')
 
-                    # sil_optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate_ph)
                     # Q Values and policy target params
                     source_params = tf_util.get_trainable_vars("model/")
                     target_params = tf_util.get_trainable_vars("target/")
@@ -234,11 +232,7 @@ class TD3SIL(OffPolicyRLModel):
                     tf.summary.scalar('qf1_loss', qf1_loss)
                     tf.summary.scalar('qf2_loss', qf2_loss)
                     tf.summary.scalar('learning_rate', tf.reduce_mean(self.learning_rate_ph))
-                self.sil = SelfImitation(self.processed_obs_ph, qf1_pi, qf2_pi, self.policy_out, ac_ph=self.actions_ph,
-                                         batch_size=self.batch_size)
 
-                self.sil.set_loss_weight(0.1)
-                self.sil.build_train_op(qvalues_params, qvalues_optimizer, self.learning_rate_ph)
                 # Retrieve parameters that must be saved
                 self.params = tf_util.get_trainable_vars("model")
                 self.target_params = tf_util.get_trainable_vars("target/")
@@ -358,8 +352,6 @@ class TD3SIL(OffPolicyRLModel):
 
                 # Store transition in the replay buffer.
                 self.replay_buffer_add(obs_, action, reward_, new_obs_, truly_done, info)
-                self.sil.step(np.array(obs_).reshape(1, -1), np.array(action).reshape(1, -1),
-                              np.array(reward_).reshape(-1), np.array(truly_done).reshape(-1))
                 obs = new_obs
                 # Save the unnormalized observation
                 if self._vec_normalize_env is not None:
@@ -377,7 +369,6 @@ class TD3SIL(OffPolicyRLModel):
                     tf_util.total_episode_reward_logger(self.episode_reward, ep_reward,
                                                         ep_done, writer, self.num_timesteps)
 
-                sil_loss, sil_adv, sil_samples = None, None, None
                 if self.num_timesteps % self.train_freq == 0:
                     callback.on_rollout_end()
 
@@ -398,7 +389,7 @@ class TD3SIL(OffPolicyRLModel):
                         # this is controlled by the `policy_delay` parameter
                         mb_infos_vals.append(
                             self._train_step(step, writer, current_lr, (step + grad_step) % self.policy_delay == 0))
-                    sil_loss, sil_adv, sil_samples = self.sil.train(self.sess, current_lr)
+
                     # Log losses and entropy, useful for monitor training
                     if len(mb_infos_vals) > 0:
                         infos_values = np.mean(mb_infos_vals, axis=0)
@@ -449,10 +440,6 @@ class TD3SIL(OffPolicyRLModel):
                         for (name, val) in zip(self.infos_names, infos_values):
                             logger.logkv(name, val)
                     logger.logkv("total timesteps", self.num_timesteps)
-                    if sil_loss is not None:
-                        logger.logkv("sil_loss", sil_loss)
-                        logger.logkv("sil_adv", sil_adv)
-                        logger.logkv("sil_samples", sil_samples)
                     logger.dumpkvs()
                     # Reset infos:
                     infos_values = []

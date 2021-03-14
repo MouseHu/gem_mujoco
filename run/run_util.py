@@ -63,7 +63,7 @@ def parse_args():
     parser.add_argument('--env-id', type=str, default='Ant-v2')
     parser.add_argument('--agent', type=str, default='TD3')
     # boolean_flag(parser, 'render-eval', default=False)
-    boolean_flag(parser, 'layer-norm', default=True)
+    boolean_flag(parser, 'layer-norm', default=False)
     boolean_flag(parser, 'evaluation', default=True)
 
     parser.add_argument('--seed', help='RNG seed', type=int, default=int(time.time()))
@@ -71,7 +71,8 @@ def parse_args():
 
     parser.add_argument('--gamma', type=float, default=0.99)
 
-    parser.add_argument('--num-timesteps', type=int, default=int(1e6))
+    parser.add_argument('--num-timesteps', type=int, default=int(1e6)+10)  # plus 10 to make one more evaluation
+    parser.add_argument('--max_steps', type=int, default=1000)  # truncate steps for ddq
 
     parser.add_argument('--delay-step', type=int, default=0)
 

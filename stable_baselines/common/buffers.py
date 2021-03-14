@@ -143,6 +143,62 @@ class ReplayBuffer(object):
         return self._encode_sample(idxes, env=env)
 
 
+class NStepReplayBuffer(ReplayBuffer):
+    def __init__(self, size, num_step=1, gamma=0.99):
+        super(NStepReplayBuffer, self).__init__(size)
+        self.num_step = num_step
+        self.gamma = gamma
+
+    def _encode_sample(self, idxes: Union[List[int], np.ndarray], env: Optional[VecNormalize] = None):
+        obses_t, actions, rewards, obses_tp1, dones = [], [], [], [], []
+        for i in idxes:
+            reward = 0
+            for step in range(self.num_step):
+                data = self._storage[(i + step) % self.buffer_size]
+                obs_t, action, r, obs_tp1, done = data
+                reward += (self.gamma ** step) * r
+                if step == 0:
+                    obses_t.append(np.array(obs_t, copy=False))
+                    actions.append(np.array(action, copy=False))
+                if step == self.num_step - 1 or done:
+                    rewards.append(reward)
+                    obses_tp1.append(np.array(obs_tp1, copy=False))
+                    dones.append(done)
+                    break
+        return (self._normalize_obs(np.array(obses_t), env),
+                np.array(actions),
+                self._normalize_reward(np.array(rewards), env),
+                self._normalize_obs(np.array(obses_tp1), env),
+                np.array(dones))
+
+    def sample(self, batch_size: int, env: Optional[VecNormalize] = None, **_kwargs):
+        """
+        Sample a batch of experiences.
+
+        :param batch_size: (int) How many transitions to sample.
+        :param env: (Optional[VecNormalize]) associated gym VecEnv
+            to normalize the observations/rewards when sampling
+        :return:
+            - obs_batch: (np.ndarray) batch of observations
+            - act_batch: (numpy float) batch of actions executed given obs_batch
+            - rew_batch: (numpy float) rewards received as results of executing act_batch
+            - next_obs_batch: (np.ndarray) next set of observations seen after executing act_batch
+            - done_mask: (numpy bool) done_mask[i] = 1 if executing act_batch[i] resulted in the end of an episode
+                and 0 otherwise.
+        """
+
+        # idxes = []
+        # while len(idxes)<batch_size:
+        #     idx = random.randint(0, len(self._storage) - 1)
+        #     for step in range(self.num_step-1):
+        #         obs_t, action, r, obs_tp1, done = self._storage[(idx+step)%self.buffer_size]
+        #         if done:
+        #             continue
+        #     idxes.append(idx)
+        idxes = [random.randint(0, len(self._storage) - self.num_step) for _ in range(batch_size)]
+        return self._encode_sample(idxes, env=env)
+
+
 class PrioritizedReplayBuffer(ReplayBuffer):
     def __init__(self, size, alpha):
         """
