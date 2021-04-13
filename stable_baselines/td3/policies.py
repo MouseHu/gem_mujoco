@@ -217,7 +217,7 @@ class TD3LnMlpPolicy(TD3Policy):
 
     def __init__(self, sess, ob_space, ac_space, n_env=1, n_steps=1, n_batch=None, reuse=False, layers=None,
                  cnn_extractor=nature_cnn, feature_extraction="mlp",
-                 layer_norm=False, act_fun=tf.nn.relu, **kwargs):  ### notice!!!!
+                 layer_norm=True, act_fun=tf.nn.relu, **kwargs):  ### notice!!!!
         super(TD3LnMlpPolicy, self).__init__(sess, ob_space, ac_space, n_env, n_steps, n_batch,
                                              reuse=reuse, scale=(feature_extraction == "cnn"))
 

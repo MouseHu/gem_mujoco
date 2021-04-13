@@ -90,6 +90,34 @@ def smooth(data, smooth_range):
     return new_data
 
 
+def data_read_ot(paths=None):
+    mine_values = []
+    num_trajs = len(paths)
+    mine_paths = paths
+    shortest = 1000000
+    for p in mine_paths:
+        csv_data = pd.read_csv(p)
+        values_steps = csv_data['total timesteps'].values
+        values_returns = csv_data['eval_ep_rewmean'].values
+        # values_returns = smoothingaverage(values_returns)
+        # print(values_steps.shape)
+        length = values_returns.shape[0]
+        shortest = length if length < shortest else shortest
+        mine_values.append([values_steps, values_returns])
+        '''plots = csv.reader(csvfile,delimiter=',')
+        print(plots)
+        for row in plots:
+            print(row)'''
+
+    xs = mine_values[0][0][:shortest] / 1e6
+    ys = np.zeros([shortest, num_trajs])
+    for i in range(num_trajs):
+        ys[:, i] = mine_values[i][1][:shortest]
+    mean = np.mean(ys, 1)
+    std = np.std(ys, 1)
+    print(mean[-1], std[-1])
+    return xs, mean, std, ys.transpose()
+
 def new_plot_full(data_full, color, name):
     data = data_full[-1]
     length = len(data[0])
@@ -119,9 +147,7 @@ def new_plot_full(data_full, color, name):
 
 
 color_set = {
-'Amaranth': np.array([0.9, 0.17, 0.31]),  # main algo
-
-
+    'Amaranth': np.array([0.9, 0.17, 0.31]),  # main algo
     'Amber': np.array([1.0, 0.49, 0.0]),  # main baseline
     # 'Orange': np.array([1.0,0.9375,0.0]),
 
@@ -130,8 +156,8 @@ color_set = {
     # 'Tensorflow Orange': np.array([1, 0.7, 0]),
     # 'Dark electric blue': 'deeppink',
     # 'Dark electric blue': 'deeppink',
-    'Dark gray': np.array([0.66, 0.66, 0.66]),
     'Arsenic': np.array([0.23, 0.27, 0.29]),
+    'Dark gray': np.array([0.66, 0.66, 0.66]),
     'Electric violet': np.array([0.56, 0.0, 1.0]),
 
 }
@@ -226,11 +252,12 @@ plt_config_cec = {
     'data_scale': 1,
     'legend_loc': 'best',
     'legend_ncol': 1,
-    'legend_prop_size': 16.0,
+    'legend_prop_size': 20.0,
     'xlabel': 'Time steps(1e6)',
-    'ylabel': 'Average Return',
+    'ylabel': 'Average Estimation Error',
+    # 'ylabel': 'Average Return',
     'xlim': (0, 1.),
-    'ylim': (-0., 6000.),
+    'ylim': (-0., 6500.),
     'color': {
         'QPLEX': color_set['Amaranth'],
         'QTRAN': color_set['Amber'],
@@ -283,7 +310,7 @@ config = config_set_default(config)
 if 'figlegend' in config.keys():
     figure = plt.figure(figsize=(config['figlegend'], 4.8))
 else:
-    figure = plt.figure(figsize=(8.5, 8.5))
+    figure = plt.figure(figsize=(12, 8))
 plt.style.use('seaborn-whitegrid')
 plt.rc('font', family='Times New Roman')
 # matplotlib.rcParams['text.usetex'] = True
@@ -299,10 +326,10 @@ def plot_all(datas, legends, start=0):
 
     plt.xlim(config['xlim'])
     plt.ylim(config['ylim'])
-    plt.tick_params('x', labelsize=20.0)
-    plt.tick_params('y', labelsize=20.0)
-    plt.xlabel(config['xlabel'], {'size': 26.0})
-    plt.ylabel(config['ylabel'], {'size': 26.0})
+    plt.tick_params('x', labelsize=24.0)
+    plt.tick_params('y', labelsize=24.0)
+    plt.xlabel(config['xlabel'], {'size': 30.0})
+    plt.ylabel(config['ylabel'], {'size': 30.0})
     ax.xaxis.set_major_locator(ticker.MaxNLocator(6))
     ax.yaxis.set_major_locator(ticker.MaxNLocator(6))
     if config['xlabel'] == 'Epoches':

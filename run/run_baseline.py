@@ -11,7 +11,9 @@ from stable_baselines.sac import SAC
 from stable_baselines.td3 import TD3
 from stable_baselines.td3.td3_doubletwin import TD3DoubleTwin
 from stable_baselines.td3.td3_mem_ddq import TD3MemDDQ
+from stable_baselines.td3.td3_mem_many import TD3MemUpdateMany
 from stable_baselines.td3.td3_n_step import TD3NSTEP
+from stable_baselines.td3.td3_ot import TD3MemOT
 from stable_baselines.td3.td3_redq import TD3REDQ
 from stable_baselines.td3.td3_sil import TD3SIL
 
@@ -70,9 +72,27 @@ def run(env_id, seed, layer_norm, evaluation, agent, delay_step, gamma=0.99, **k
                           tau=0.005, policy_delay=2, learning_starts=25000,
                           action_noise=create_action_noise(env, "normal_0.1"), buffer_size=100000, verbose=2,
                           n_cpu_tf_sess=10,
-                          alpha=0.5, beta=-1, iterative_q=-1,
-                          num_q=4, gradient_steps=100, max_step=kwargs['max_steps'], reward_scale=1., nb_eval_steps=10,
+                          alpha=1, beta=-1, iterative_q=-1,
+                          num_q=4, gradient_steps=200, max_step=kwargs['max_steps'], reward_scale=1., nb_eval_steps=10,
                           policy_kwargs={"layers": [400, 300]})
+    elif agent == "AMC":
+        policy = 'TD3LnMlpPolicy'
+        model = TD3MemUpdateMany(policy=policy, env=env, eval_env=eval_env, gamma=gamma, batch_size=128,
+                                 tau=0.005, policy_delay=2, learning_starts=25000,
+                                 action_noise=create_action_noise(env, "normal_0.1"), buffer_size=100000, verbose=2,
+                                 n_cpu_tf_sess=10,
+                                 alpha=0.5, beta=-1, gradient_steps=200, max_step=kwargs['max_steps'], reward_scale=1.,
+                                 nb_eval_steps=10,
+                                 policy_kwargs={"layers": [400, 300]})
+    elif agent == "OT":
+        policy = 'TD3LnMlpPolicy'
+        model = TD3MemOT(policy=policy, env=env, eval_env=eval_env, gamma=gamma, batch_size=128,
+                         tau=0.005, policy_delay=2, learning_starts=2000,
+                         action_noise=create_action_noise(env, "normal_0.1"), buffer_size=50000, verbose=2,
+                         n_cpu_tf_sess=10, traj_length=4, bound_ratio=0.8,
+                         alpha=1, beta=-1, gradient_steps=200, max_step=kwargs['max_steps'], reward_scale=1.,
+                         nb_eval_steps=10,
+                         policy_kwargs={"layers": [400, 300]})
     else:
         raise NotImplementedError
 

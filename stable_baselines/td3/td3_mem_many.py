@@ -526,16 +526,16 @@ class TD3MemUpdateMany(OffPolicyRLModel):
                     train_time += time.time() - cur_time
                     callback.on_rollout_start()
 
-                if step % eval_interval == 0 and self.eval_env is not None:
-                    mean_return, std_return = evaluate_policy(self, self.eval_env)
-                    logger.logkv('eval_ep_rewmean', mean_return)
-                    logger.logkv('eval_ep_rewstd', std_return)
-                    logger.logkv("total timesteps", self.num_timesteps)
-                    logger.dumpkvs()
+                # if step % eval_interval == 0 and self.eval_env is not None:
+                #     mean_return, std_return = evaluate_policy(self, self.eval_env)
+                #     logger.logkv('eval_ep_rewmean', mean_return)
+                #     logger.logkv('eval_ep_rewstd', std_return)
+                #     logger.logkv("total timesteps", self.num_timesteps)
+                #     logger.dumpkvs()
 
-                # if step % eval_interval == 0:
-                #     # Evaluate.
-                #     self.evaluate(self.nb_eval_steps)
+                if step % eval_interval == 0:
+                    # Evaluate.
+                    self.evaluate(self.nb_eval_steps)
 
                 if done:
                     if self.action_noise is not None:
@@ -593,8 +593,10 @@ class TD3MemUpdateMany(OffPolicyRLModel):
 
                     if len(episode_successes) > 0:
                         logger.logkv("success rate", np.mean(episode_successes[-100:]))
+                    # print(len(infos_values))
                     if len(infos_values) > 0:
                         for (name, val) in zip(self.infos_names, infos_values):
+                            # print(name,val)
                             logger.logkv(name, val)
                     logger.logkv("total timesteps", self.num_timesteps)
                     logger.dumpkvs()
